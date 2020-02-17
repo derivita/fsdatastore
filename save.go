@@ -5,24 +5,19 @@
 package datastore
 
 import (
-	"errors"
+	"context"
 	"fmt"
 	"math"
 	"reflect"
+	"strings"
 	"time"
 
-	"github.com/golang/protobuf/proto"
+	"github.com/golang/protobuf/ptypes"
 
 	"google.golang.org/appengine"
-	pb "google.golang.org/appengine/internal/datastore"
+	pb "google.golang.org/genproto/googleapis/firestore/v1"
+	"google.golang.org/genproto/googleapis/type/latlng"
 )
-
-func toUnixMicro(t time.Time) int64 {
-	// We cannot use t.UnixNano() / 1e3 because we want to handle times more than
-	// 2^63 nanoseconds (which is about 292 years) away from 1970, and those cannot
-	// be represented in the numerator of a single int64 divide.
-	return t.Unix()*1e6 + int64(t.Nanosecond()/1e3)
-}
 
 func fromUnixMicro(t int64) time.Time {
 	return time.Unix(t/1e6, (t%1e6)*1e3).UTC()
@@ -33,28 +28,27 @@ var (
 	maxTime = time.Unix(int64(math.MaxInt64)/1e6, (int64(math.MaxInt64)%1e6)*1e3)
 )
 
-// valueToProto converts a named value to a newly allocated Property.
+// valueToProto converts a value to a newly allocated Value.
 // The returned error string is empty on success.
-func valueToProto(defaultAppID, name string, v reflect.Value, multiple bool) (p *pb.Property, errStr string) {
+func valueToProto(defaultAppID string, v reflect.Value) (pv *pb.Value, errStr string) {
 	var (
-		pv          pb.PropertyValue
 		unsupported bool
 	)
 	switch v.Kind() {
 	case reflect.Invalid:
 		// No-op.
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		pv.Int64Value = proto.Int64(v.Int())
+		pv.ValueType = &pb.Value_IntegerValue{v.Int()}
 	case reflect.Bool:
-		pv.BooleanValue = proto.Bool(v.Bool())
+		pv.ValueType = &pb.Value_BooleanValue{v.Bool()}
 	case reflect.String:
-		pv.StringValue = proto.String(v.String())
+		pv.ValueType = &pb.Value_StringValue{v.String()}
 	case reflect.Float32, reflect.Float64:
-		pv.DoubleValue = proto.Float64(v.Float())
+		pv.ValueType = &pb.Value_DoubleValue{v.Float()}
 	case reflect.Ptr:
 		if k, ok := v.Interface().(*Key); ok {
 			if k != nil {
-				pv.Referencevalue = keyToReferenceValue(defaultAppID, k)
+				pv.ValueType = &pb.Value_ReferenceValue{keyToReferenceValue(defaultAppID, k)}
 			}
 		} else {
 			unsupported = true
@@ -65,19 +59,19 @@ func valueToProto(defaultAppID, name string, v reflect.Value, multiple bool) (p 
 			if t.Before(minTime) || t.After(maxTime) {
 				return nil, "time value out of range"
 			}
-			pv.Int64Value = proto.Int64(toUnixMicro(t))
+			ts, _ := ptypes.TimestampProto(t)
+			pv.ValueType = &pb.Value_TimestampValue{ts}
 		case appengine.GeoPoint:
 			if !t.Valid() {
 				return nil, "invalid GeoPoint value"
 			}
-			// NOTE: Strangely, latitude maps to X, longitude to Y.
-			pv.Pointvalue = &pb.PropertyValue_PointValue{X: &t.Lat, Y: &t.Lng}
+			pv.ValueType = &pb.Value_GeoPointValue{&latlng.LatLng{Latitude: t.Lat, Longitude: t.Lng}}
 		default:
 			unsupported = true
 		}
 	case reflect.Slice:
 		if b, ok := v.Interface().([]byte); ok {
-			pv.StringValue = proto.String(string(b))
+			pv.ValueType = &pb.Value_BytesValue{b}
 		} else {
 			// nvToProto should already catch slice values.
 			// If we get here, we have a slice of slice values.
@@ -89,26 +83,8 @@ func valueToProto(defaultAppID, name string, v reflect.Value, multiple bool) (p 
 	if unsupported {
 		return nil, "unsupported datastore value type: " + v.Type().String()
 	}
-	p = &pb.Property{
-		Name:     proto.String(name),
-		Value:    &pv,
-		Multiple: proto.Bool(multiple),
-	}
-	if v.IsValid() {
-		switch v.Interface().(type) {
-		case []byte:
-			p.Meaning = pb.Property_BLOB.Enum()
-		case ByteString:
-			p.Meaning = pb.Property_BYTESTRING.Enum()
-		case appengine.BlobKey:
-			p.Meaning = pb.Property_BLOBKEY.Enum()
-		case time.Time:
-			p.Meaning = pb.Property_GD_WHEN.Enum()
-		case appengine.GeoPoint:
-			p.Meaning = pb.Property_GEORSS_POINT.Enum()
-		}
-	}
-	return p, ""
+
+	return pv, ""
 }
 
 type saveOpts struct {
@@ -117,8 +93,8 @@ type saveOpts struct {
 	omitEmpty bool
 }
 
-// saveEntity saves an EntityProto into a PropertyLoadSaver or struct pointer.
-func saveEntity(defaultAppID string, key *Key, src interface{}) (*pb.EntityProto, error) {
+// saveEntity saves a PropertyLoadSaver or struct pointer into a Firestore Write.
+func saveEntity(c context.Context, defaultAppID string, key *Key, src interface{}) (*pb.Write, error) {
 	var err error
 	var props []Property
 	if e, ok := src.(PropertyLoadSaver); ok {
@@ -129,7 +105,7 @@ func saveEntity(defaultAppID string, key *Key, src interface{}) (*pb.EntityProto
 	if err != nil {
 		return nil, err
 	}
-	return propertiesToProto(defaultAppID, key, props)
+	return propertiesToProto(c, defaultAppID, key, props)
 }
 
 func saveStructProperty(props *[]Property, name string, opts saveOpts, v reflect.Value) error {
@@ -222,15 +198,22 @@ func (s structPLS) save(props *[]Property, prefix string, opts saveOpts) error {
 	return nil
 }
 
-func propertiesToProto(defaultAppID string, key *Key, props []Property) (*pb.EntityProto, error) {
-	e := &pb.EntityProto{
-		Key: keyToProto(defaultAppID, key),
+func propertiesToProto(c context.Context, defaultAppID string, key *Key, props []Property) (*pb.Write, error) {
+	var precondition *pb.Precondition
+	if key.Incomplete() {
+		key = &Key{
+			kind:     key.Kind(),
+			stringID: uniqueID(),
+			appID:    key.AppID(),
+			parent:   key.Parent(),
+		}
+		precondition = &pb.Precondition{ConditionType: &pb.Precondition_Exists{false}}
 	}
-	if key.parent == nil {
-		e.EntityGroup = &pb.Path{}
-	} else {
-		e.EntityGroup = keyToProto(defaultAppID, key.root()).Path
+	e := &pb.Document{
+		Name:   keyToReferenceValue(defaultAppID, key),
+		Fields: make(map[string]*pb.Value),
 	}
+
 	prevMultiple := make(map[string]bool)
 
 	for _, p := range props {
@@ -242,68 +225,94 @@ func propertiesToProto(defaultAppID string, key *Key, props []Property) (*pb.Ent
 			prevMultiple[p.Name] = p.Multiple
 		}
 
-		x := &pb.Property{
-			Name:     proto.String(p.Name),
-			Value:    new(pb.PropertyValue),
-			Multiple: proto.Bool(p.Multiple),
-		}
+		x := &pb.Value{}
 		switch v := p.Value.(type) {
 		case int64:
-			x.Value.Int64Value = proto.Int64(v)
+			x.ValueType = &pb.Value_IntegerValue{v}
 		case bool:
-			x.Value.BooleanValue = proto.Bool(v)
+			x.ValueType = &pb.Value_BooleanValue{v}
 		case string:
-			x.Value.StringValue = proto.String(v)
-			if p.NoIndex {
-				x.Meaning = pb.Property_TEXT.Enum()
-			}
+			x.ValueType = &pb.Value_StringValue{v}
 		case float64:
-			x.Value.DoubleValue = proto.Float64(v)
+			x.ValueType = &pb.Value_DoubleValue{v}
 		case *Key:
 			if v != nil {
-				x.Value.Referencevalue = keyToReferenceValue(defaultAppID, v)
+				x.ValueType = &pb.Value_ReferenceValue{keyToReferenceValue(defaultAppID, v)}
 			}
 		case time.Time:
 			if v.Before(minTime) || v.After(maxTime) {
 				return nil, fmt.Errorf("datastore: time value out of range")
 			}
-			x.Value.Int64Value = proto.Int64(toUnixMicro(v))
-			x.Meaning = pb.Property_GD_WHEN.Enum()
+			ts, _ := ptypes.TimestampProto(v)
+			x.ValueType = &pb.Value_TimestampValue{ts}
 		case appengine.BlobKey:
-			x.Value.StringValue = proto.String(string(v))
-			x.Meaning = pb.Property_BLOBKEY.Enum()
+			x.ValueType = &pb.Value_StringValue{string(v)}
 		case appengine.GeoPoint:
 			if !v.Valid() {
 				return nil, fmt.Errorf("datastore: invalid GeoPoint value")
 			}
-			// NOTE: Strangely, latitude maps to X, longitude to Y.
-			x.Value.Pointvalue = &pb.PropertyValue_PointValue{X: &v.Lat, Y: &v.Lng}
-			x.Meaning = pb.Property_GEORSS_POINT.Enum()
+			x.ValueType = &pb.Value_GeoPointValue{&latlng.LatLng{Latitude: v.Lat, Longitude: v.Lng}}
 		case []byte:
-			x.Value.StringValue = proto.String(string(v))
-			x.Meaning = pb.Property_BLOB.Enum()
-			if !p.NoIndex {
-				return nil, fmt.Errorf("datastore: cannot index a []byte valued Property with Name %q", p.Name)
-			}
+			x.ValueType = &pb.Value_BytesValue{v}
 		case ByteString:
-			x.Value.StringValue = proto.String(string(v))
-			x.Meaning = pb.Property_BYTESTRING.Enum()
+			x.ValueType = &pb.Value_BytesValue{v}
 		default:
 			if p.Value != nil {
 				return nil, fmt.Errorf("datastore: invalid Value type for a Property with Name %q", p.Name)
 			}
 		}
 
-		if p.NoIndex {
-			e.RawProperty = append(e.RawProperty, x)
-		} else {
-			e.Property = append(e.Property, x)
-			if len(e.Property) > maxIndexedProperties {
-				return nil, errors.New("datastore: too many indexed properties")
+		if p.Multiple {
+			if existing, ok := e.Fields[p.Name]; ok {
+				av := existing.ValueType.(*pb.Value_ArrayValue).ArrayValue
+				av.Values = append(av.Values, x)
+			} else {
+				e.Fields[p.Name] = &pb.Value{ValueType: &pb.Value_ArrayValue{&pb.ArrayValue{Values: []*pb.Value{x}}}}
 			}
+		} else {
+			e.Fields[p.Name] = x
 		}
 	}
-	return e, nil
+	return &pb.Write{
+		Operation:       &pb.Write_Update{e},
+		CurrentDocument: precondition,
+	}, nil
+}
+
+func setProperty(e *pb.Document, name string, value *pb.Value, multiple bool) error {
+	// convert dotted names to MapValues.
+	path := strings.Split(name, ".")
+	fields := e.Fields
+	for len(path) > 1 {
+		var mapvalue *pb.Value_MapValue
+		if existing, ok := fields[path[0]]; ok {
+			if mapvalue, ok = existing.ValueType.(*pb.Value_MapValue); !ok {
+				return fmt.Errorf("datastore: multiple nested Properties with name " + name)
+			}
+		} else {
+			mapvalue = &pb.Value_MapValue{&pb.MapValue{Fields: make(map[string]*pb.Value)}}
+			fields[path[0]] = &pb.Value{ValueType: mapvalue}
+		}
+		fields = mapvalue.MapValue.Fields
+		path = path[1:]
+	}
+
+	if !multiple {
+		fields[path[0]] = value
+	}
+
+	// Collect multiples into ArrayValues.
+	var arrayvalue *pb.Value_ArrayValue
+	if existing, ok := fields[path[0]]; ok {
+		if arrayvalue, ok = existing.ValueType.(*pb.Value_ArrayValue); !ok {
+			return fmt.Errorf("datastore: multiple and non-multiple properties with name " + name)
+		}
+	} else {
+		arrayvalue = &pb.Value_ArrayValue{&pb.ArrayValue{}}
+		fields[path[0]] = &pb.Value{ValueType: arrayvalue}
+	}
+	arrayvalue.ArrayValue.Values = append(arrayvalue.ArrayValue.Values, value)
+	return nil
 }
 
 // isEmptyValue is taken from the encoding/json package in the standard library.

@@ -8,13 +8,16 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
+	"strings"
 
 	"github.com/golang/protobuf/proto"
-	"golang.org/x/net/context"
+	"context"
 
 	"google.golang.org/appengine"
-	"google.golang.org/appengine/internal"
-	pb "google.golang.org/appengine/internal/datastore"
+	pb "google.golang.org/genproto/googleapis/firestore/v1"
+
+	dspb "google.golang.org/appengine/datastore/internal/datastore"
 )
 
 var (
@@ -45,7 +48,7 @@ func (e *ErrFieldMismatch) Error() string {
 
 // protoToKey converts a Reference proto to a *Key. If the key is invalid,
 // protoToKey will return the invalid key along with ErrInvalidKey.
-func protoToKey(r *pb.Reference) (k *Key, err error) {
+func protoToKey(r *dspb.Reference) (k *Key, err error) {
 	appID := r.GetApp()
 	namespace := r.GetNameSpace()
 	for _, e := range r.Path.Element {
@@ -65,7 +68,7 @@ func protoToKey(r *pb.Reference) (k *Key, err error) {
 }
 
 // keyToProto converts a *Key to a Reference proto.
-func keyToProto(defaultAppID string, k *Key) *pb.Reference {
+func keyToProto(defaultAppID string, k *Key) *dspb.Reference {
 	appID := k.appID
 	if appID == "" {
 		appID = defaultAppID
@@ -74,10 +77,10 @@ func keyToProto(defaultAppID string, k *Key) *pb.Reference {
 	for i := k; i != nil; i = i.parent {
 		n++
 	}
-	e := make([]*pb.Path_Element, n)
+	e := make([]*dspb.Path_Element, n)
 	for i := k; i != nil; i = i.parent {
 		n--
-		e[n] = &pb.Path_Element{
+		e[n] = &dspb.Path_Element{
 			Type: &i.kind,
 		}
 		// At most one of {Name,Id} should be set.
@@ -92,20 +95,20 @@ func keyToProto(defaultAppID string, k *Key) *pb.Reference {
 	if k.namespace != "" {
 		namespace = proto.String(k.namespace)
 	}
-	return &pb.Reference{
+	return &dspb.Reference{
 		App:       proto.String(appID),
 		NameSpace: namespace,
-		Path: &pb.Path{
+		Path: &dspb.Path{
 			Element: e,
 		},
 	}
 }
 
-// multiKeyToProto is a batch version of keyToProto.
-func multiKeyToProto(appID string, key []*Key) []*pb.Reference {
-	ret := make([]*pb.Reference, len(key))
+// multiKeyToProto is a batch version of keyToReferenceValue.
+func multiKeyToProto(appID string, key []*Key) []string {
+	ret := make([]string, len(key))
 	for i, k := range key {
-		ret[i] = keyToProto(appID, k)
+		ret[i] = keyToReferenceValue(appID, k)
 	}
 	return ret
 }
@@ -132,23 +135,18 @@ func multiValid(key []*Key) error {
 	return err
 }
 
-// It's unfortunate that the two semantically equivalent concepts pb.Reference
-// and pb.PropertyValue_ReferenceValue aren't the same type. For example, the
-// two have different protobuf field numbers.
-
-// referenceValueToKey is the same as protoToKey except the input is a
-// PropertyValue_ReferenceValue instead of a Reference.
-func referenceValueToKey(r *pb.PropertyValue_ReferenceValue) (k *Key, err error) {
-	appID := r.GetApp()
-	namespace := r.GetNameSpace()
-	for _, e := range r.Pathelement {
+// referenceValueToKey converts a firestore Document name to a Key.
+func referenceValueToKey(r string) (k *Key, err error) {
+	appID, _, elems, err := parseDocumentPath(r)
+	if err != nil {
+		return nil, err
+	}
+	for i := 0; i < len(elems); i += 2 {
 		k = &Key{
-			kind:      e.GetType(),
-			stringID:  e.GetName(),
-			intID:     e.GetId(),
-			parent:    k,
-			appID:     appID,
-			namespace: namespace,
+			kind:     elems[i],
+			stringID: elems[i+1],
+			parent:   k,
+			appID:    appID,
 		}
 		if !k.valid() {
 			return nil, ErrInvalidKey
@@ -157,23 +155,32 @@ func referenceValueToKey(r *pb.PropertyValue_ReferenceValue) (k *Key, err error)
 	return
 }
 
-// keyToReferenceValue is the same as keyToProto except the output is a
-// PropertyValue_ReferenceValue instead of a Reference.
-func keyToReferenceValue(defaultAppID string, k *Key) *pb.PropertyValue_ReferenceValue {
-	ref := keyToProto(defaultAppID, k)
-	pe := make([]*pb.PropertyValue_ReferenceValue_PathElement, len(ref.Path.Element))
-	for i, e := range ref.Path.Element {
-		pe[i] = &pb.PropertyValue_ReferenceValue_PathElement{
-			Type: e.Type,
-			Id:   e.Id,
-			Name: e.Name,
+// keyToReferenceValue converts a Key to a firestore style reference string:
+// projects/{project_id}/databases/(default)/documents/{document_path}
+// Integer ids are simply converted to strings
+func keyToReferenceValue(defaultAppID string, k *Key) string {
+	if k.Incomplete() {
+		panic("incomplete key")
+	}
+	appID := k.AppID()
+	if appID == "" {
+		appID = defaultAppID
+	}
+	parts := []string{"projects", appID, "databases/(default)/documents"}
+	var appendKey func(k *Key)
+	appendKey = func(k *Key) {
+		if k.Parent() != nil {
+			appendKey(k.Parent())
+		}
+		parts = append(parts, k.Kind())
+		if k.String() != "" {
+			parts = append(parts, k.String())
+		} else {
+			parts = append(parts, strconv.FormatInt(k.IntID(), 10))
 		}
 	}
-	return &pb.PropertyValue_ReferenceValue{
-		App:         ref.App,
-		NameSpace:   ref.NameSpace,
-		Pathelement: pe,
-	}
+	appendKey(k)
+	return strings.Join(parts, "/")
 }
 
 type multiArgType int
@@ -252,7 +259,11 @@ func Get(c context.Context, key *Key, dst interface{}) error {
 // As a special case, PropertyList is an invalid type for dst, even though a
 // PropertyList is a slice of structs. It is treated as invalid to avoid being
 // mistakenly passed when []PropertyList was intended.
-func GetMulti(c context.Context, key []*Key, dst interface{}) error {
+func GetMulti(c context.Context, key []*Key, dst interface{}) (err error) {
+	client := getClient()
+	c = client.startSpan(c, "fsdatastore.GetMulti")
+	defer func() { client.endSpan(c, err) }()
+
 	v := reflect.ValueOf(dst)
 	multiArgType, _ := checkMultiArg(v)
 	if multiArgType == multiArgTypeInvalid {
@@ -267,19 +278,21 @@ func GetMulti(c context.Context, key []*Key, dst interface{}) error {
 	if err := multiValid(key); err != nil {
 		return err
 	}
-	req := &pb.GetRequest{
-		Key: multiKeyToProto(internal.FullyQualifiedAppID(c), key),
-	}
-	res := &pb.GetResponse{}
-	if err := internal.Call(c, "datastore_v3", "Get", req, res); err != nil {
+	txid, err := currentTransactionForRead(c)
+	if err != nil {
 		return err
 	}
-	if len(key) != len(res.Entity) {
+
+	res, err := client.getAll(c, multiKeyToProto(client.projectID, key), txid)
+	if err != nil {
+		return err
+	}
+	if len(key) != len(res) {
 		return errors.New("datastore: internal error: server returned the wrong number of entities")
 	}
 	multiErr, any := make(appengine.MultiError, len(key)), false
-	for i, e := range res.Entity {
-		if e.Entity == nil {
+	for i, e := range res {
+		if e == nil {
 			multiErr[i] = ErrNoSuchEntity
 		} else {
 			elem := v.Index(i)
@@ -289,7 +302,7 @@ func GetMulti(c context.Context, key []*Key, dst interface{}) error {
 			if multiArgType == multiArgTypeStructPtr && elem.IsNil() {
 				elem.Set(reflect.New(elem.Type().Elem()))
 			}
-			multiErr[i] = loadEntity(elem.Interface(), e.Entity)
+			multiErr[i] = loadEntity(elem.Interface(), e)
 		}
 		if multiErr[i] != nil {
 			any = true
@@ -331,33 +344,33 @@ func PutMulti(c context.Context, key []*Key, src interface{}) ([]*Key, error) {
 	if len(key) == 0 {
 		return nil, nil
 	}
-	appID := internal.FullyQualifiedAppID(c)
+	client := getClient()
+	appID := client.projectID
 	if err := multiValid(key); err != nil {
 		return nil, err
 	}
-	req := &pb.PutRequest{}
+	var writes []*pb.Write
 	for i := range key {
 		elem := v.Index(i)
 		if multiArgType == multiArgTypePropertyLoadSaver || multiArgType == multiArgTypeStruct {
 			elem = elem.Addr()
 		}
-		sProto, err := saveEntity(appID, key[i], elem.Interface())
+		sProto, err := saveEntity(c, appID, key[i], elem.Interface())
 		if err != nil {
 			return nil, err
 		}
-		req.Entity = append(req.Entity, sProto)
+		writes = append(writes, sProto)
 	}
-	res := &pb.PutResponse{}
-	if err := internal.Call(c, "datastore_v3", "Put", req, res); err != nil {
+
+	_, err := client.commit(c, writes)
+	if err != nil {
 		return nil, err
-	}
-	if len(key) != len(res.Key) {
-		return nil, errors.New("datastore: internal error: server returned the wrong number of keys")
 	}
 	ret := make([]*Key, len(key))
 	for i := range ret {
 		var err error
-		ret[i], err = protoToKey(res.Key[i])
+		docRef := writes[i].GetUpdate().Name
+		ret[i], err = referenceValueToKey(docRef)
 		if err != nil || ret[i].Incomplete() {
 			return nil, errors.New("datastore: internal error: server returned an invalid key")
 		}
@@ -382,26 +395,28 @@ func DeleteMulti(c context.Context, key []*Key) error {
 	if err := multiValid(key); err != nil {
 		return err
 	}
-	req := &pb.DeleteRequest{
-		Key: multiKeyToProto(internal.FullyQualifiedAppID(c), key),
-	}
-	res := &pb.DeleteResponse{}
-	return internal.Call(c, "datastore_v3", "Delete", req, res)
-}
-
-func namespaceMod(m proto.Message, namespace string) {
-	// pb.Query is the only type that has a name_space field.
-	// All other namespace support in datastore is in the keys.
-	switch m := m.(type) {
-	case *pb.Query:
-		if m.NameSpace == nil {
-			m.NameSpace = &namespace
+	client := getClient()
+	docNames := multiKeyToProto(client.projectID, key)
+	writes := make([]*pb.Write, len(docNames))
+	for i := range writes {
+		writes[i] = &pb.Write{
+			Operation: &pb.Write_Delete{docNames[i]},
 		}
 	}
+	_, err := client.commit(c, writes)
+	return err
 }
 
-func init() {
-	internal.NamespaceMods["datastore_v3"] = namespaceMod
-	internal.RegisterErrorCodeMap("datastore_v3", pb.Error_ErrorCode_name)
-	internal.RegisterTimeoutErrorCode("datastore_v3", int32(pb.Error_TIMEOUT))
+// from https://github.com/googleapis/google-cloud-go/blob/master/firestore/from_value.go
+// A document path should be of the form "projects/P/databases/D/documents/coll1/doc1/coll2/doc2/...".
+func parseDocumentPath(path string) (projectID, databaseID string, docPath []string, err error) {
+	parts := strings.Split(path, "/")
+	if len(parts) < 6 || parts[0] != "projects" || parts[2] != "databases" || parts[4] != "documents" {
+		return "", "", nil, fmt.Errorf("firestore: malformed document path %q", path)
+	}
+	docp := parts[5:]
+	if len(docp)%2 != 0 {
+		return "", "", nil, fmt.Errorf("firestore: path %q refers to collection, not document", path)
+	}
+	return parts[1], parts[3], docp, nil
 }

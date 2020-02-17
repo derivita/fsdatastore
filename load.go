@@ -10,9 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/golang/protobuf/proto"
 	"google.golang.org/appengine"
-	pb "google.golang.org/appengine/internal/datastore"
+	pb "google.golang.org/genproto/googleapis/firestore/v1"
 )
 
 var (
@@ -23,6 +22,7 @@ var (
 	typeOfTime       = reflect.TypeOf(time.Time{})
 	typeOfKeyPtr     = reflect.TypeOf(&Key{})
 	typeOfEntityPtr  = reflect.TypeOf(&Entity{})
+	typeOfString     = reflect.TypeOf("")
 )
 
 // typeMismatchReason returns a string explaining why the property p could not
@@ -131,33 +131,7 @@ func (l *propertyLoader) load(codec *structCodec, structValue reflect.Value, p P
 		return "multiple-valued property requires a slice field type"
 	}
 
-	// Convert indexValues to a Go value with a meaning derived from the
-	// destination type.
-	pValue := p.Value
-	if iv, ok := pValue.(indexValue); ok {
-		meaning := pb.Property_NO_MEANING
-		switch v.Type() {
-		case typeOfBlobKey:
-			meaning = pb.Property_BLOBKEY
-		case typeOfByteSlice:
-			meaning = pb.Property_BLOB
-		case typeOfByteString:
-			meaning = pb.Property_BYTESTRING
-		case typeOfGeoPoint:
-			meaning = pb.Property_GEORSS_POINT
-		case typeOfTime:
-			meaning = pb.Property_GD_WHEN
-		case typeOfEntityPtr:
-			meaning = pb.Property_ENTITY_PROTO
-		}
-		var err error
-		pValue, err = propValue(iv.value, meaning)
-		if err != nil {
-			return err.Error()
-		}
-	}
-
-	if errReason := setVal(v, pValue); errReason != "" {
+	if errReason := setVal(v, p.Value); errReason != "" {
 		// Set the slice back to its zero value.
 		if slice.IsValid() {
 			slice.Set(reflect.Zero(slice.Type()))
@@ -192,9 +166,7 @@ func setVal(v reflect.Value, pValue interface{}) string {
 		v.SetBool(x)
 	case reflect.String:
 		switch x := pValue.(type) {
-		case appengine.BlobKey:
-			v.SetString(string(x))
-		case ByteString:
+		case []byte:
 			v.SetString(string(x))
 		case string:
 			v.SetString(x)
@@ -295,8 +267,8 @@ func initField(val reflect.Value, index []int) reflect.Value {
 	return val.Field(index[len(index)-1])
 }
 
-// loadEntity loads an EntityProto into PropertyLoadSaver or struct pointer.
-func loadEntity(dst interface{}, src *pb.EntityProto) (err error) {
+// loadEntity loads an Document into PropertyLoadSaver or struct pointer.
+func loadEntity(dst interface{}, src *pb.Document) (err error) {
 	ent, err := protoToEntity(src)
 	if err != nil {
 		return err
@@ -328,102 +300,63 @@ func (s structPLS) Load(props []Property) error {
 	return nil
 }
 
-func protoToEntity(src *pb.EntityProto) (*Entity, error) {
-	props, rawProps := src.Property, src.RawProperty
-	outProps := make([]Property, 0, len(props)+len(rawProps))
-	for {
-		var (
-			x       *pb.Property
-			noIndex bool
-		)
-		if len(props) > 0 {
-			x, props = props[0], props[1:]
-		} else if len(rawProps) > 0 {
-			x, rawProps = rawProps[0], rawProps[1:]
-			noIndex = true
-		} else {
-			break
+func protoToEntity(src *pb.Document) (*Entity, error) {
+	outProps := make([]Property, 0, len(src.Fields))
+	for name, fieldvalue := range src.Fields {
+		values := []*pb.Value{fieldvalue}
+		multiple := false
+		if array, ok := fieldvalue.ValueType.(*pb.Value_ArrayValue); ok {
+			values = array.ArrayValue.Values
+			multiple = true
 		}
-
-		var value interface{}
-		if x.Meaning != nil && *x.Meaning == pb.Property_INDEX_VALUE {
-			value = indexValue{x.Value}
-		} else {
-			var err error
-			value, err = propValue(x.Value, x.GetMeaning())
+		for _, x := range values {
+			value, err := propValue(x)
 			if err != nil {
 				return nil, err
 			}
+			outProps = append(outProps, Property{
+				Name:     name,
+				Value:    value,
+				Multiple: multiple,
+			})
 		}
-		outProps = append(outProps, Property{
-			Name:     x.GetName(),
-			Value:    value,
-			NoIndex:  noIndex,
-			Multiple: x.GetMultiple(),
-		})
 	}
 
 	var key *Key
-	if src.Key != nil {
+	if src.Name != "" {
 		// Ignore any error, since nested entity values
 		// are allowed to have an invalid key.
-		key, _ = protoToKey(src.Key)
+		key, _ = referenceValueToKey(src.Name)
 	}
 	return &Entity{key, outProps}, nil
 }
 
-// propValue returns a Go value that combines the raw PropertyValue with a
-// meaning. For example, an Int64Value with GD_WHEN becomes a time.Time.
-func propValue(v *pb.PropertyValue, m pb.Property_Meaning) (interface{}, error) {
-	switch {
-	case v.Int64Value != nil:
-		if m == pb.Property_GD_WHEN {
-			return fromUnixMicro(*v.Int64Value), nil
-		} else {
-			return *v.Int64Value, nil
-		}
-	case v.BooleanValue != nil:
-		return *v.BooleanValue, nil
-	case v.StringValue != nil:
-		if m == pb.Property_BLOB {
-			return []byte(*v.StringValue), nil
-		} else if m == pb.Property_BLOBKEY {
-			return appengine.BlobKey(*v.StringValue), nil
-		} else if m == pb.Property_BYTESTRING {
-			return ByteString(*v.StringValue), nil
-		} else if m == pb.Property_ENTITY_PROTO {
-			var ent pb.EntityProto
-			err := proto.Unmarshal([]byte(*v.StringValue), &ent)
-			if err != nil {
-				return nil, err
-			}
-			return protoToEntity(&ent)
-		} else {
-			return *v.StringValue, nil
-		}
-	case v.DoubleValue != nil:
-		return *v.DoubleValue, nil
-	case v.Referencevalue != nil:
-		key, err := referenceValueToKey(v.Referencevalue)
+// propValue returns a Go value from a firestore Value.
+func propValue(v *pb.Value) (interface{}, error) {
+	switch vt := v.ValueType.(type) {
+	case *pb.Value_IntegerValue:
+		return vt.IntegerValue, nil
+	case *pb.Value_TimestampValue:
+	case *pb.Value_BooleanValue:
+		return vt.BooleanValue, nil
+	case *pb.Value_BytesValue:
+		return vt.BytesValue, nil
+	case *pb.Value_MapValue:
+		return protoToEntity(&pb.Document{Fields: vt.MapValue.Fields})
+	case *pb.Value_StringValue:
+		return vt.StringValue, nil
+	case *pb.Value_ArrayValue:
+		return nil, fmt.Errorf("datastore: unhandled ArrayValue")
+	case *pb.Value_DoubleValue:
+		return vt.DoubleValue, nil
+	case *pb.Value_ReferenceValue:
+		key, err := referenceValueToKey(vt.ReferenceValue)
 		if err != nil {
 			return nil, err
 		}
 		return key, nil
-	case v.Pointvalue != nil:
-		// NOTE: Strangely, latitude maps to X, longitude to Y.
-		return appengine.GeoPoint{Lat: v.Pointvalue.GetX(), Lng: v.Pointvalue.GetY()}, nil
+	case *pb.Value_GeoPointValue:
+		return appengine.GeoPoint{Lat: vt.GeoPointValue.Latitude, Lng: vt.GeoPointValue.Longitude}, nil
 	}
 	return nil, nil
-}
-
-// indexValue is a Property value that is created when entities are loaded from
-// an index, such as from a projection query.
-//
-// Such Property values do not contain all of the metadata required to be
-// faithfully represented as a Go value, and are instead represented as an
-// opaque indexValue. Load the properties into a concrete struct type (e.g. by
-// passing a struct pointer to Iterator.Next) to reconstruct actual Go values
-// of type int, string, time.Time, etc.
-type indexValue struct {
-	value *pb.PropertyValue
 }

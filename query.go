@@ -5,18 +5,19 @@
 package datastore
 
 import (
-	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"reflect"
 	"strings"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/golang/protobuf/ptypes/wrappers"
+
 	"golang.org/x/net/context"
 
-	"google.golang.org/appengine/internal"
-	pb "google.golang.org/appengine/internal/datastore"
+	pb "google.golang.org/genproto/googleapis/firestore/v1"
 )
 
 type operator int
@@ -29,12 +30,12 @@ const (
 	greaterThan
 )
 
-var operatorToProto = map[operator]*pb.Query_Filter_Operator{
-	lessThan:    pb.Query_Filter_LESS_THAN.Enum(),
-	lessEq:      pb.Query_Filter_LESS_THAN_OR_EQUAL.Enum(),
-	equal:       pb.Query_Filter_EQUAL.Enum(),
-	greaterEq:   pb.Query_Filter_GREATER_THAN_OR_EQUAL.Enum(),
-	greaterThan: pb.Query_Filter_GREATER_THAN.Enum(),
+var operatorToProto = map[operator]pb.StructuredQuery_FieldFilter_Operator{
+	lessThan:    pb.StructuredQuery_FieldFilter_LESS_THAN,
+	lessEq:      pb.StructuredQuery_FieldFilter_LESS_THAN_OR_EQUAL,
+	equal:       pb.StructuredQuery_FieldFilter_EQUAL,
+	greaterEq:   pb.StructuredQuery_FieldFilter_GREATER_THAN_OR_EQUAL,
+	greaterThan: pb.StructuredQuery_FieldFilter_GREATER_THAN,
 }
 
 // filter is a conditional filter on query results.
@@ -51,9 +52,9 @@ const (
 	descending
 )
 
-var sortDirectionToProto = map[sortDirection]*pb.Query_Order_Direction{
-	ascending:  pb.Query_Order_ASCENDING.Enum(),
-	descending: pb.Query_Order_DESCENDING.Enum(),
+var sortDirectionToProto = map[sortDirection]pb.StructuredQuery_Direction{
+	ascending:  pb.StructuredQuery_ASCENDING,
+	descending: pb.StructuredQuery_DESCENDING,
 }
 
 // order is a sort order on query results.
@@ -82,15 +83,12 @@ type Query struct {
 	order      []order
 	projection []string
 
-	distinct   bool
-	distinctOn []string
-	keysOnly   bool
-	eventual   bool
-	limit      int32
-	offset     int32
-	count      int32
-	start      *pb.CompiledCursor
-	end        *pb.CompiledCursor
+	keysOnly bool
+	eventual bool
+	limit    int32
+	offset   int32
+	start    *pb.Cursor
+	end      *pb.Cursor
 
 	err error
 }
@@ -198,25 +196,6 @@ func (q *Query) Project(fieldNames ...string) *Query {
 	return q
 }
 
-// Distinct returns a derivative query that yields de-duplicated entities with
-// respect to the set of projected fields. It is only used for projection
-// queries. Distinct cannot be used with DistinctOn.
-func (q *Query) Distinct() *Query {
-	q = q.clone()
-	q.distinct = true
-	return q
-}
-
-// DistinctOn returns a derivative query that yields de-duplicated entities with
-// respect to the set of the specified fields. It is only used for projection
-// queries. The field list should be a subset of the projected field list.
-// DistinctOn cannot be used with Distinct.
-func (q *Query) DistinctOn(fieldNames ...string) *Query {
-	q = q.clone()
-	q.distinctOn = fieldNames
-	return q
-}
-
 // KeysOnly returns a derivative query that yields only keys, not keys and
 // entities. It cannot be used with projection queries.
 func (q *Query) KeysOnly() *Query {
@@ -253,115 +232,94 @@ func (q *Query) Offset(offset int) *Query {
 	return q
 }
 
-// BatchSize returns a derivative query to fetch the supplied number of results
-// at once. This value should be greater than zero, and equal to or less than
-// the Limit.
-func (q *Query) BatchSize(size int) *Query {
-	q = q.clone()
-	if size <= 0 || size > math.MaxInt32 {
-		q.err = errors.New("datastore: query batch size overflow")
-		return q
-	}
-	q.count = int32(size)
-	return q
-}
-
-// Start returns a derivative query with the given start point.
-func (q *Query) Start(c Cursor) *Query {
-	q = q.clone()
-	if c.cc == nil {
-		q.err = errors.New("datastore: invalid cursor")
-		return q
-	}
-	q.start = c.cc
-	return q
-}
-
-// End returns a derivative query with the given end point.
-func (q *Query) End(c Cursor) *Query {
-	q = q.clone()
-	if c.cc == nil {
-		q.err = errors.New("datastore: invalid cursor")
-		return q
-	}
-	q.end = c.cc
-	return q
-}
-
 // toProto converts the query to a protocol buffer.
-func (q *Query) toProto(dst *pb.Query, appID string) error {
+func (q *Query) toProto(ctx context.Context, req *pb.RunQueryRequest, client *client) error {
 	if len(q.projection) != 0 && q.keysOnly {
 		return errors.New("datastore: query cannot both project and be keys-only")
 	}
-	if len(q.distinctOn) != 0 && q.distinct {
-		return errors.New("datastore: query cannot be both distinct and distinct-on")
+	txid, err := currentTransactionForRead(ctx)
+	if err != nil {
+		return err
 	}
-	dst.Reset()
-	dst.App = proto.String(appID)
-	if q.kind != "" {
-		dst.Kind = proto.String(q.kind)
-	}
+	req.Reset()
+	req.Parent = client.root()
+	req.QueryType = &pb.RunQueryRequest_StructuredQuery{&pb.StructuredQuery{}}
 	if q.ancestor != nil {
-		dst.Ancestor = keyToProto(appID, q.ancestor)
-		if q.eventual {
-			dst.Strong = proto.Bool(false)
-		}
+		req.Parent = keyToReferenceValue(client.projectID, q.ancestor)
 	}
+	if txid != nil {
+		req.ConsistencySelector = &pb.RunQueryRequest_Transaction{txid}
+	}
+
+	dst := req.GetStructuredQuery()
+	dst.From = []*pb.StructuredQuery_CollectionSelector{{
+		CollectionId:   q.kind,
+		AllDescendants: true,
+	}}
 	if q.projection != nil {
-		dst.PropertyName = q.projection
-		if len(q.distinctOn) != 0 {
-			dst.GroupByPropertyName = q.distinctOn
+		fields := make([]*pb.StructuredQuery_FieldReference, len(q.projection))
+		for i := range fields {
+			fields[i] = &pb.StructuredQuery_FieldReference{FieldPath: q.projection[i]}
 		}
-		if q.distinct {
-			dst.GroupByPropertyName = q.projection
-		}
+		dst.Select = &pb.StructuredQuery_Projection{Fields: fields}
 	}
 	if q.keysOnly {
-		dst.KeysOnly = proto.Bool(true)
-		dst.RequirePerfectPlan = proto.Bool(true)
+		dst.Select = &pb.StructuredQuery_Projection{
+			Fields: []*pb.StructuredQuery_FieldReference{{FieldPath: "__name__"}},
+		}
 	}
+	var filters []*pb.StructuredQuery_Filter
 	for _, qf := range q.filter {
 		if qf.FieldName == "" {
 			return errors.New("datastore: empty query filter field name")
 		}
-		p, errStr := valueToProto(appID, qf.FieldName, reflect.ValueOf(qf.Value), false)
+		p, errStr := valueToProto(client.projectID, reflect.ValueOf(qf.Value))
 		if errStr != "" {
 			return errors.New("datastore: bad query filter value type: " + errStr)
 		}
-		xf := &pb.Query_Filter{
-			Op:       operatorToProto[qf.Op],
-			Property: []*pb.Property{p},
+		xf := &pb.StructuredQuery_FieldFilter{
+			Field: &pb.StructuredQuery_FieldReference{FieldPath: qf.FieldName},
+			Op:    operatorToProto[qf.Op],
+			Value: p,
 		}
-		if xf.Op == nil {
+		if xf.Op == pb.StructuredQuery_FieldFilter_OPERATOR_UNSPECIFIED {
 			return errors.New("datastore: unknown query filter operator")
 		}
-		dst.Filter = append(dst.Filter, xf)
+		filters = append(filters, &pb.StructuredQuery_Filter{FilterType: &pb.StructuredQuery_Filter_FieldFilter{xf}})
+	}
+	if len(filters) == 1 {
+		dst.Where = filters[0]
+	} else if len(filters) > 1 {
+		dst.Where = &pb.StructuredQuery_Filter{FilterType: &pb.StructuredQuery_Filter_CompositeFilter{
+			&pb.StructuredQuery_CompositeFilter{
+				Op:      pb.StructuredQuery_CompositeFilter_AND,
+				Filters: filters,
+			},
+		},
+		}
 	}
 	for _, qo := range q.order {
 		if qo.FieldName == "" {
 			return errors.New("datastore: empty query order field name")
 		}
-		xo := &pb.Query_Order{
-			Property:  proto.String(qo.FieldName),
+		xo := &pb.StructuredQuery_Order{
+			Field:     &pb.StructuredQuery_FieldReference{FieldPath: qo.FieldName},
 			Direction: sortDirectionToProto[qo.Direction],
 		}
-		if xo.Direction == nil {
+		if xo.Direction == pb.StructuredQuery_DIRECTION_UNSPECIFIED {
 			return errors.New("datastore: unknown query order direction")
 		}
-		dst.Order = append(dst.Order, xo)
+		dst.OrderBy = append(dst.OrderBy, xo)
 	}
 	if q.limit >= 0 {
-		dst.Limit = proto.Int32(q.limit)
+		dst.Limit = &wrappers.Int32Value{Value: q.limit}
 	}
 	if q.offset != 0 {
-		dst.Offset = proto.Int32(q.offset)
+		dst.Offset = q.offset
 	}
-	if q.count != 0 {
-		dst.Count = proto.Int32(q.count)
-	}
-	dst.CompiledCursor = q.start
-	dst.EndCompiledCursor = q.end
-	dst.Compile = proto.Bool(true)
+
+	dst.StartAt = q.start
+	dst.EndAt = q.end
 	return nil
 }
 
@@ -394,12 +352,13 @@ func (q *Query) Count(c context.Context) (int, error) {
 			newQ.offset = math.MaxInt32
 		}
 	}
-	req := &pb.Query{}
-	if err := newQ.toProto(req, internal.FullyQualifiedAppID(c)); err != nil {
+	client := getClient()
+	req := &pb.RunQueryRequest{}
+	if err := newQ.toProto(c, req, client); err != nil {
 		return 0, err
 	}
-	res := &pb.QueryResult{}
-	if err := internal.Call(c, "datastore_v3", "RunQuery", req, res); err != nil {
+	stream, err := client.c.RunQuery(c, req)
+	if err != nil {
 		return 0, err
 	}
 
@@ -419,18 +378,15 @@ func (q *Query) Count(c context.Context) (int, error) {
 	//   // exit the loop
 	//   n -= 4     // n == 2008
 	var n int32
-	for {
+	for res, err := stream.Recv(); err != io.EOF; res, err = stream.Recv() {
+		if err != nil {
+			return 0, err
+		}
 		// The QueryResult should have no actual entity data, just skipped results.
-		if len(res.Result) != 0 {
+		if res.Document != nil {
 			return 0, errors.New("datastore: internal error: Count request returned too much data")
 		}
 		n += res.GetSkippedResults()
-		if !res.GetMoreResults() {
-			break
-		}
-		if err := callNext(c, res, newQ.offset-n, q.count); err != nil {
-			return 0, err
-		}
 	}
 	n -= q.offset
 	if n < 0 {
@@ -443,24 +399,16 @@ func (q *Query) Count(c context.Context) (int, error) {
 
 // callNext issues a datastore_v3/Next RPC to advance a cursor, such as that
 // returned by a query with more results.
-func callNext(c context.Context, res *pb.QueryResult, offset, count int32) error {
-	if res.Cursor == nil {
-		return errors.New("datastore: internal error: server did not return a cursor")
+func (t *Iterator) callNext() error {
+	t.res.Reset()
+	res, err := t.stream.Recv()
+	if err == io.EOF {
+		err = Done
+	} else if err == nil {
+		proto.Merge(&t.res, res)
 	}
-	req := &pb.NextRequest{
-		Cursor: res.Cursor,
-	}
-	if count >= 0 {
-		req.Count = proto.Int32(count)
-	}
-	if offset != 0 {
-		req.Offset = proto.Int32(offset)
-	}
-	if res.CompiledCursor != nil {
-		req.Compile = proto.Bool(true)
-	}
-	res.Reset()
-	return internal.Call(c, "datastore_v3", "Next", req, res)
+	t.err = err
+	return err
 }
 
 // GetAll runs the query in the given context and returns all keys that match
@@ -555,32 +503,23 @@ func (q *Query) Run(c context.Context) *Iterator {
 		return &Iterator{err: q.err}
 	}
 	t := &Iterator{
-		c:      c,
-		limit:  q.limit,
-		count:  q.count,
-		q:      q,
-		prevCC: q.start,
+		limit: q.limit,
+		q:     q,
 	}
-	var req pb.Query
-	if err := q.toProto(&req, internal.FullyQualifiedAppID(c)); err != nil {
+	client := getClient()
+	var req pb.RunQueryRequest
+	if err := q.toProto(c, &req, client); err != nil {
 		t.err = err
 		return t
 	}
-	if err := internal.Call(c, "datastore_v3", "RunQuery", &req, &t.res); err != nil {
-		t.err = err
+	t.stream, t.err = client.c.RunQuery(c, &req)
+	if t.err != nil {
 		return t
 	}
 	offset := q.offset - t.res.GetSkippedResults()
-	var count int32
-	if t.count > 0 && (t.limit < 0 || t.count < t.limit) {
-		count = t.count
-	} else {
-		count = t.limit
-	}
-	for offset > 0 && t.res.GetMoreResults() {
-		t.prevCC = t.res.CompiledCursor
-		if err := callNext(t.c, &t.res, offset, count); err != nil {
-			t.err = err
+
+	for offset > 0 && t.err == nil {
+		if err := t.callNext(); err != nil {
 			break
 		}
 		skip := t.res.GetSkippedResults()
@@ -598,23 +537,15 @@ func (q *Query) Run(c context.Context) *Iterator {
 
 // Iterator is the result of running a query.
 type Iterator struct {
-	c   context.Context
 	err error
 	// res is the result of the most recent RunQuery or Next API call.
-	res pb.QueryResult
-	// i is how many elements of res.Result we have iterated over.
-	i int
+	res pb.RunQueryResponse
 	// limit is the limit on the number of results this iterator should return.
 	// A negative value means unlimited.
 	limit int32
-	// count is the number of results this iterator should fetch at once. This
-	// should be equal to or greater than zero.
-	count int32
 	// q is the original query which yielded this iterator.
-	q *Query
-	// prevCC is the compiled cursor that marks the end of the previous batch
-	// of results.
-	prevCC *pb.CompiledCursor
+	q      *Query
+	stream pb.Firestore_RunQueryClient
 }
 
 // Done is returned when a query iteration has completed.
@@ -637,35 +568,23 @@ func (t *Iterator) Next(dst interface{}) (*Key, error) {
 	return k, err
 }
 
-func (t *Iterator) next() (*Key, *pb.EntityProto, error) {
+func (t *Iterator) next() (*Key, *pb.Document, error) {
 	if t.err != nil {
 		return nil, nil, t.err
 	}
 
-	// Issue datastore_v3/Next RPCs as necessary.
-	for t.i == len(t.res.Result) {
-		if !t.res.GetMoreResults() {
-			t.err = Done
-			return nil, nil, t.err
-		}
-		t.prevCC = t.res.CompiledCursor
-		var count int32
-		if t.count > 0 && (t.limit < 0 || t.count < t.limit) {
-			count = t.count
-		} else {
-			count = t.limit
-		}
-		if err := callNext(t.c, &t.res, 0, count); err != nil {
-			t.err = err
+	// Read from the stream as necessary.
+	for haveDoc := false; !haveDoc; {
+		if t.callNext() != nil {
 			return nil, nil, t.err
 		}
 		if t.res.GetSkippedResults() != 0 {
 			t.err = errors.New("datastore: internal error: iterator has skipped results")
 			return nil, nil, t.err
 		}
-		t.i = 0
-		if t.limit >= 0 {
-			t.limit -= int32(len(t.res.Result))
+		haveDoc = t.res.Document != nil
+		if t.limit >= 0 && haveDoc {
+			t.limit -= 1
 			if t.limit < 0 {
 				t.err = errors.New("datastore: internal error: query returned more results than the limit")
 				return nil, nil, t.err
@@ -673,102 +592,14 @@ func (t *Iterator) next() (*Key, *pb.EntityProto, error) {
 		}
 	}
 
-	// Extract the key from the t.i'th element of t.res.Result.
-	e := t.res.Result[t.i]
-	t.i++
-	if e.Key == nil {
+	// Extract the key from t.res.Document.
+	e := t.res.Document
+	if e.Name == "" {
 		return nil, nil, errors.New("datastore: internal error: server did not return a key")
 	}
-	k, err := protoToKey(e.Key)
+	k, err := referenceValueToKey(e.Name)
 	if err != nil || k.Incomplete() {
 		return nil, nil, errors.New("datastore: internal error: server returned an invalid key")
 	}
 	return k, e, nil
-}
-
-// Cursor returns a cursor for the iterator's current location.
-func (t *Iterator) Cursor() (Cursor, error) {
-	if t.err != nil && t.err != Done {
-		return Cursor{}, t.err
-	}
-	// If we are at either end of the current batch of results,
-	// return the compiled cursor at that end.
-	skipped := t.res.GetSkippedResults()
-	if t.i == 0 && skipped == 0 {
-		if t.prevCC == nil {
-			// A nil pointer (of type *pb.CompiledCursor) means no constraint:
-			// passing it as the end cursor of a new query means unlimited results
-			// (glossing over the integer limit parameter for now).
-			// A non-nil pointer to an empty pb.CompiledCursor means the start:
-			// passing it as the end cursor of a new query means 0 results.
-			// If prevCC was nil, then the original query had no start cursor, but
-			// Iterator.Cursor should return "the start" instead of unlimited.
-			return Cursor{&zeroCC}, nil
-		}
-		return Cursor{t.prevCC}, nil
-	}
-	if t.i == len(t.res.Result) {
-		return Cursor{t.res.CompiledCursor}, nil
-	}
-	// Otherwise, re-run the query offset to this iterator's position, starting from
-	// the most recent compiled cursor. This is done on a best-effort basis, as it
-	// is racy; if a concurrent process has added or removed entities, then the
-	// cursor returned may be inconsistent.
-	q := t.q.clone()
-	q.start = t.prevCC
-	q.offset = skipped + int32(t.i)
-	q.limit = 0
-	q.keysOnly = len(q.projection) == 0
-	t1 := q.Run(t.c)
-	_, _, err := t1.next()
-	if err != Done {
-		if err == nil {
-			err = fmt.Errorf("datastore: internal error: zero-limit query did not have zero results")
-		}
-		return Cursor{}, err
-	}
-	return Cursor{t1.res.CompiledCursor}, nil
-}
-
-var zeroCC pb.CompiledCursor
-
-// Cursor is an iterator's position. It can be converted to and from an opaque
-// string. A cursor can be used from different HTTP requests, but only with a
-// query with the same kind, ancestor, filter and order constraints.
-type Cursor struct {
-	cc *pb.CompiledCursor
-}
-
-// String returns a base-64 string representation of a cursor.
-func (c Cursor) String() string {
-	if c.cc == nil {
-		return ""
-	}
-	b, err := proto.Marshal(c.cc)
-	if err != nil {
-		// The only way to construct a Cursor with a non-nil cc field is to
-		// unmarshal from the byte representation. We panic if the unmarshal
-		// succeeds but the marshaling of the unchanged protobuf value fails.
-		panic(fmt.Sprintf("datastore: internal error: malformed cursor: %v", err))
-	}
-	return strings.TrimRight(base64.URLEncoding.EncodeToString(b), "=")
-}
-
-// Decode decodes a cursor from its base-64 string representation.
-func DecodeCursor(s string) (Cursor, error) {
-	if s == "" {
-		return Cursor{&zeroCC}, nil
-	}
-	if n := len(s) % 4; n != 0 {
-		s += strings.Repeat("=", 4-n)
-	}
-	b, err := base64.URLEncoding.DecodeString(s)
-	if err != nil {
-		return Cursor{}, err
-	}
-	cc := &pb.CompiledCursor{}
-	if err := proto.Unmarshal(b, cc); err != nil {
-		return Cursor{}, err
-	}
-	return Cursor{cc}, nil
 }
