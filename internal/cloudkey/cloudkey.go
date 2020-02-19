@@ -13,7 +13,7 @@ import (
 	"strings"
 
 	"github.com/golang/protobuf/proto"
-	cloudpb "google.golang.org/appengine/datastore/internal/cloudpb"
+	cloudpb "github.com/derivita/fsdatastore/internal/cloudpb"
 )
 
 /////////////////////////////////////////////////////////////////////

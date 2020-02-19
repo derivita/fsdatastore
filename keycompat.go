@@ -9,8 +9,7 @@ import (
 
 	"golang.org/x/net/context"
 
-	"google.golang.org/appengine/datastore/internal/cloudkey"
-	"google.golang.org/appengine/internal"
+	"github.com/derivita/fsdatastore/internal/cloudkey"
 )
 
 var keyConversion struct {
@@ -42,7 +41,7 @@ func EnableKeyConversion(ctx context.Context) {
 	// Check again to avoid race where another goroutine set appID between the call
 	// to getKeyConversionAppID above and taking the write lock.
 	if keyConversion.appID == "" {
-		keyConversion.appID = internal.FullyQualifiedAppID(ctx)
+		keyConversion.appID = getClient().projectID
 	}
 	keyConversion.mu.Unlock()
 }

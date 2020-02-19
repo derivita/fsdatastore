@@ -6,6 +6,7 @@ package datastore
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/gob"
@@ -15,30 +16,11 @@ import (
 	"strings"
 
 	"github.com/golang/protobuf/proto"
-	"golang.org/x/net/context"
 
-	pb "google.golang.org/appengine/datastore/internal/datastore"
+	pb "github.com/derivita/fsdatastore/internal"
 )
 
-type KeyRangeCollisionError struct {
-	start int64
-	end   int64
-}
 
-func (e *KeyRangeCollisionError) Error() string {
-	return fmt.Sprintf("datastore: Collision when attempting to allocate range [%d, %d]",
-		e.start, e.end)
-}
-
-type KeyRangeContentionError struct {
-	start int64
-	end   int64
-}
-
-func (e *KeyRangeContentionError) Error() string {
-	return fmt.Sprintf("datastore: Contention when attempting to allocate range [%d, %d]",
-		e.start, e.end)
-}
 
 // Key represents the datastore key for a stored entity, and is immutable.
 type Key struct {

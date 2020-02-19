@@ -17,7 +17,7 @@ import (
 	"google.golang.org/appengine"
 	pb "google.golang.org/genproto/googleapis/firestore/v1"
 
-	dspb "google.golang.org/appengine/datastore/internal/datastore"
+	dspb "github.com/derivita/fsdatastore/internal"
 )
 
 var (
