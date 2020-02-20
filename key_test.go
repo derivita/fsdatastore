@@ -200,3 +200,73 @@ func TestNamespace(t *testing.T) {
 		t.Errorf("key.Namespace() = %q, want %q", g, w)
 	}
 }
+
+func TestKeyToReference(t *testing.T) {
+	testCases := []struct {
+		desc   string
+		key    *Key
+		exp    string
+		decode bool
+	}{
+		{
+			desc: "A simple key with an int ID",
+			key: &Key{
+				kind:  "Person",
+				intID: 1,
+				appID: "glibrary",
+			},
+			exp:    "projects/glibrary/databases/(default)/documents/Person/1",
+			decode: false,
+		},
+		{
+			desc: "A simple key with a string ID",
+			key: &Key{
+				kind:     "Graph",
+				stringID: "graph:7-day-active",
+				appID:    "glibrary",
+			},
+			exp:    "projects/glibrary/databases/(default)/documents/Graph/graph:7-day-active",
+			decode: true,
+		},
+		{
+			desc: "A simple key with no app id",
+			key: &Key{
+				kind:     "Graph",
+				stringID: "graph:7-day-active",
+			},
+			exp:    "projects/test-app/databases/(default)/documents/Graph/graph:7-day-active",
+			decode: false,
+		},
+		{
+			desc: "A key with a parent",
+			key: &Key{
+				kind:  "WordIndex",
+				intID: 1033,
+				parent: &Key{
+					kind:  "WordIndex",
+					intID: 1020032,
+					appID: "glibrary",
+				},
+				appID: "glibrary",
+			},
+			exp:    "projects/glibrary/databases/(default)/documents/WordIndex/1020032/WordIndex/1033",
+			decode: false,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.desc, func(t *testing.T) {
+			enc := keyToReferenceValue("test-app", tc.key)
+			if enc != tc.exp {
+				t.Errorf("got %q, want %q", enc, tc.exp)
+			}
+
+			key, err := referenceValueToKey(enc)
+			if err != nil {
+				t.Fatalf("failed decoding key: %v", err)
+			}
+			if tc.decode && !key.Equal(tc.key) {
+				t.Errorf("decoded key %v, want %v", key, tc.key)
+			}
+		})
+	}
+}

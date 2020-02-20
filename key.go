@@ -20,8 +20,6 @@ import (
 	pb "github.com/derivita/fsdatastore/internal"
 )
 
-
-
 // Key represents the datastore key for a stored entity, and is immutable.
 type Key struct {
 	kind      string

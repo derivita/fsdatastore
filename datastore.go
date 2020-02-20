@@ -11,8 +11,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/golang/protobuf/proto"
 	"context"
+
+	"github.com/golang/protobuf/proto"
 
 	"google.golang.org/appengine"
 	pb "google.golang.org/genproto/googleapis/firestore/v1"
@@ -172,11 +173,11 @@ func keyToReferenceValue(defaultAppID string, k *Key) string {
 		if k.Parent() != nil {
 			appendKey(k.Parent())
 		}
-		parts = append(parts, k.Kind())
-		if k.String() != "" {
-			parts = append(parts, k.String())
+		parts = append(parts, k.kind)
+		if k.stringID != "" {
+			parts = append(parts, k.stringID)
 		} else {
-			parts = append(parts, strconv.FormatInt(k.IntID(), 10))
+			parts = append(parts, strconv.FormatInt(k.intID, 10))
 		}
 	}
 	appendKey(k)
