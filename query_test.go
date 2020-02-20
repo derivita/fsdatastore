@@ -13,88 +13,50 @@ import (
 
 	"github.com/golang/protobuf/proto"
 
-	"google.golang.org/appengine/internal"
-	"google.golang.org/appengine/internal/aetesting"
-	pb "google.golang.org/appengine/internal/datastore"
+	pb "google.golang.org/genproto/googleapis/firestore/v1"
 )
 
 var (
-	path1 = &pb.Path{
-		Element: []*pb.Path_Element{
-			{
-				Type: proto.String("Gopher"),
-				Id:   proto.Int64(6),
-			},
-		},
-	}
-	path2 = &pb.Path{
-		Element: []*pb.Path_Element{
-			{
-				Type: proto.String("Gopher"),
-				Id:   proto.Int64(6),
-			},
-			{
-				Type: proto.String("Gopher"),
-				Id:   proto.Int64(8),
-			},
-		},
-	}
+	path1 = "projects/test-app/databases/(default)/documents/Gopher/6"
+	path2 = "projects/test-app/databases/(default)/documents/Gopher/6/Gopher/8"
 )
 
-func fakeRunQuery(in *pb.Query, out *pb.QueryResult) error {
-	expectedIn := &pb.Query{
-		App:     proto.String("dev~fake-app"),
-		Kind:    proto.String("Gopher"),
-		Compile: proto.Bool(true),
+func fakeRunQuery(in *pb.RunQueryRequest) ([]*pb.RunQueryResponse, error) {
+	expectedIn := &pb.RunQueryRequest{
+		Parent: "projects/fake-app/databases/(default)/documents",
+		QueryType: &pb.RunQueryRequest_StructuredQuery{&pb.StructuredQuery{From: []*pb.StructuredQuery_CollectionSelector{
+			{CollectionId: "Gopher"},
+		}}},
 	}
 	if !proto.Equal(in, expectedIn) {
-		return fmt.Errorf("unsupported argument: got %v want %v", in, expectedIn)
+		return nil, fmt.Errorf("unsupported argument: got %v want %v", in, expectedIn)
 	}
-	*out = pb.QueryResult{
-		Result: []*pb.EntityProto{
-			{
-				Key: &pb.Reference{
-					App:  proto.String("s~test-app"),
-					Path: path1,
-				},
-				EntityGroup: path1,
-				Property: []*pb.Property{
-					{
-						Meaning: pb.Property_TEXT.Enum(),
-						Name:    proto.String("Name"),
-						Value: &pb.PropertyValue{
-							StringValue: proto.String("George"),
-						},
+	return []*pb.RunQueryResponse{
+		{
+			Document: &pb.Document{
+				Name: path1,
+				Fields: map[string]*pb.Value{
+					"Name": &pb.Value{
+						ValueType: &pb.Value_StringValue{"George"},
 					},
-					{
-						Name: proto.String("Height"),
-						Value: &pb.PropertyValue{
-							Int64Value: proto.Int64(32),
-						},
+					"Height": &pb.Value{
+						ValueType: &pb.Value_IntegerValue{32},
 					},
 				},
 			},
-			{
-				Key: &pb.Reference{
-					App:  proto.String("s~test-app"),
-					Path: path2,
-				},
-				EntityGroup: path1, // ancestor is George
-				Property: []*pb.Property{
-					{
-						Meaning: pb.Property_TEXT.Enum(),
-						Name:    proto.String("Name"),
-						Value: &pb.PropertyValue{
-							StringValue: proto.String("Rufus"),
-						},
+		},
+		{
+			Document: &pb.Document{
+				Name: path2,
+				Fields: map[string]*pb.Value{
+					"Name": &pb.Value{
+						ValueType: &pb.Value_StringValue{"Rufus"},
 					},
 					// No height for Rufus.
 				},
 			},
 		},
-		MoreResults: proto.Bool(false),
-	}
-	return nil
+	}, nil
 }
 
 type StructThatImplementsPLS struct{}

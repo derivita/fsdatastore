@@ -6,13 +6,10 @@ package datastore
 
 import (
 	"bytes"
+	"context"
 	"encoding/gob"
 	"encoding/json"
 	"testing"
-
-	"golang.org/x/net/context"
-
-	"google.golang.org/appengine/internal"
 )
 
 func TestKeyEncoding(t *testing.T) {
@@ -168,7 +165,8 @@ func TestNilKeyJSON(t *testing.T) {
 }
 
 func TestIncompleteKeyWithParent(t *testing.T) {
-	c := internal.WithAppIDOverride(context.Background(), "s~some-app")
+	Init("s~some-app")
+	c := context.Background()
 
 	// fadduh is a complete key.
 	fadduh := NewKey(c, "Person", "", 1, nil)
