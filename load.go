@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/golang/protobuf/ptypes"
 	"google.golang.org/appengine"
 	pb "google.golang.org/genproto/googleapis/firestore/v1"
 )
@@ -337,6 +338,7 @@ func propValue(v *pb.Value) (interface{}, error) {
 	case *pb.Value_IntegerValue:
 		return vt.IntegerValue, nil
 	case *pb.Value_TimestampValue:
+		return ptypes.Timestamp(vt.TimestampValue)
 	case *pb.Value_BooleanValue:
 		return vt.BooleanValue, nil
 	case *pb.Value_BytesValue:
