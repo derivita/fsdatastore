@@ -93,13 +93,7 @@ func (k *Key) valid() bool {
 
 // Equal returns whether two keys are equal.
 func (k *Key) Equal(o *Key) bool {
-	for k != nil && o != nil {
-		if k.kind != o.kind || k.stringID != o.stringID || k.intID != o.intID || k.appID != o.appID || k.namespace != o.namespace {
-			return false
-		}
-		k, o = k.parent, o.parent
-	}
-	return k == o
+	return keyToReferenceValue(k.AppID(), k) == keyToReferenceValue(k.AppID(), k)
 }
 
 // root returns the furthest ancestor of a key, which may be itself.

@@ -203,10 +203,9 @@ func TestNamespace(t *testing.T) {
 
 func TestKeyToReference(t *testing.T) {
 	testCases := []struct {
-		desc   string
-		key    *Key
-		exp    string
-		decode bool
+		desc string
+		key  *Key
+		exp  string
 	}{
 		{
 			desc: "A simple key with an int ID",
@@ -215,8 +214,7 @@ func TestKeyToReference(t *testing.T) {
 				intID: 1,
 				appID: "glibrary",
 			},
-			exp:    "projects/glibrary/databases/(default)/documents/Person/1",
-			decode: false,
+			exp: "projects/glibrary/databases/(default)/documents/Person/1",
 		},
 		{
 			desc: "A simple key with a string ID",
@@ -225,8 +223,7 @@ func TestKeyToReference(t *testing.T) {
 				stringID: "graph:7-day-active",
 				appID:    "glibrary",
 			},
-			exp:    "projects/glibrary/databases/(default)/documents/Graph/graph:7-day-active",
-			decode: true,
+			exp: "projects/glibrary/databases/(default)/documents/Graph/graph:7-day-active",
 		},
 		{
 			desc: "A simple key with no app id",
@@ -234,8 +231,7 @@ func TestKeyToReference(t *testing.T) {
 				kind:     "Graph",
 				stringID: "graph:7-day-active",
 			},
-			exp:    "projects/test-app/databases/(default)/documents/Graph/graph:7-day-active",
-			decode: false,
+			exp: "projects/test-app/databases/(default)/documents/Graph/graph:7-day-active",
 		},
 		{
 			desc: "A key with a parent",
@@ -249,8 +245,7 @@ func TestKeyToReference(t *testing.T) {
 				},
 				appID: "glibrary",
 			},
-			exp:    "projects/glibrary/databases/(default)/documents/WordIndex/1020032/WordIndex/1033",
-			decode: false,
+			exp: "projects/glibrary/databases/(default)/documents/WordIndex/1020032/WordIndex/1033",
 		},
 	}
 	for _, tc := range testCases {
@@ -264,7 +259,7 @@ func TestKeyToReference(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed decoding key: %v", err)
 			}
-			if tc.decode && !key.Equal(tc.key) {
+			if !key.Equal(tc.key) {
 				t.Errorf("decoded key %v, want %v", key, tc.key)
 			}
 		})
