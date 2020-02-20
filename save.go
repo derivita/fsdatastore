@@ -225,7 +225,7 @@ func propertiesToProto(c context.Context, defaultAppID string, key *Key, props [
 			prevMultiple[p.Name] = p.Multiple
 		}
 
-		x := &pb.Value{}
+		x := &pb.Value{ValueType: &pb.Value_NullValue{}}
 		switch v := p.Value.(type) {
 		case int64:
 			x.ValueType = &pb.Value_IntegerValue{v}
