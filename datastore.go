@@ -106,12 +106,17 @@ func keyToProto(defaultAppID string, k *Key) *dspb.Reference {
 }
 
 // multiKeyToProto is a batch version of keyToReferenceValue.
-func multiKeyToProto(appID string, key []*Key) []string {
-	ret := make([]string, len(key))
+func multiKeyToProto(appID string, key []*Key) (ret []string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = ErrInvalidKey
+		}
+	}()
+	ret = make([]string, len(key))
 	for i, k := range key {
 		ret[i] = keyToReferenceValue(appID, k)
 	}
-	return ret
+	return ret, nil
 }
 
 // multiValid is a batch version of Key.valid. It returns an error, not a
@@ -161,7 +166,7 @@ func referenceValueToKey(r string) (k *Key, err error) {
 // Integer ids are simply converted to strings
 func keyToReferenceValue(defaultAppID string, k *Key) string {
 	if k.Incomplete() {
-		panic("incomplete key")
+		panic(ErrInvalidKey)
 	}
 	appID := k.AppID()
 	if appID == "" {
@@ -284,7 +289,11 @@ func GetMulti(c context.Context, key []*Key, dst interface{}) (err error) {
 		return err
 	}
 
-	res, err := client.getAll(c, multiKeyToProto(client.projectID, key), txid)
+	keys, err := multiKeyToProto(client.projectID, key)
+	if err != nil {
+		return err
+	}
+	res, err := client.getAll(c, keys, txid)
 	if err != nil {
 		return err
 	}
@@ -397,14 +406,17 @@ func DeleteMulti(c context.Context, key []*Key) error {
 		return err
 	}
 	client := getClient()
-	docNames := multiKeyToProto(client.projectID, key)
+	docNames, err := multiKeyToProto(client.projectID, key)
+	if err != nil {
+		return err
+	}
 	writes := make([]*pb.Write, len(docNames))
 	for i := range writes {
 		writes[i] = &pb.Write{
 			Operation: &pb.Write_Delete{docNames[i]},
 		}
 	}
-	_, err := client.commit(c, writes)
+	_, err = client.commit(c, writes)
 	return err
 }
 

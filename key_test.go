@@ -265,3 +265,27 @@ func TestKeyToReference(t *testing.T) {
 		})
 	}
 }
+
+func TestIncompleteMultiKeyToProto(t *testing.T) {
+	keys := []*Key{
+		{
+
+			kind:  "Person",
+			intID: 1,
+			appID: "glibrary",
+		},
+		{
+			kind:     "Graph",
+			stringID: "graph:7-day-active",
+			appID:    "glibrary",
+		},
+		{
+			kind:  "Person",
+			appID: "glibrary",
+		},
+	}
+	_, err := multiKeyToProto("glibrary", keys)
+	if err == nil {
+		t.Errorf("expected an error")
+	}
+}
