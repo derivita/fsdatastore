@@ -34,6 +34,7 @@ func valueToProto(defaultAppID string, v reflect.Value) (pv *pb.Value, errStr st
 	var (
 		unsupported bool
 	)
+	pv = &pb.Value{}
 	switch v.Kind() {
 	case reflect.Invalid:
 		// No-op.
