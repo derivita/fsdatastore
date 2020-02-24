@@ -6,6 +6,7 @@ require (
 	github.com/googleapis/gax-go/v2 v2.0.5
 	go.opencensus.io v0.22.3
 	golang.org/x/net v0.0.0-20200219183655-46282727080f
+	golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543
 	google.golang.org/api v0.17.0
 	google.golang.org/appengine v1.6.5
 	google.golang.org/genproto v0.0.0-20200218151345-dad8c97a84f5

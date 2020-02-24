@@ -6,9 +6,10 @@ package datastore
 
 import (
 	"context"
-	"errors"
+	"strings"
 
 	gax "github.com/googleapis/gax-go/v2"
+	"golang.org/x/xerrors"
 	pb "google.golang.org/genproto/googleapis/firestore/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -23,22 +24,43 @@ type transaction struct {
 	writes         []*pb.Write
 	maxAttempts    int
 	readOnly       bool
-	readAfterWrite bool
+	readAfterWrite error
 }
 
 var (
 	// Defined here for testing.
-	errReadAfterWrite    = errors.New("firestore: read after write in transaction")
-	errWriteReadOnly     = errors.New("firestore: write in read-only transaction")
-	errNestedTransaction = errors.New("firestore: nested transaction")
+	errWriteReadOnly     = xerrors.New("firestore: write in read-only transaction")
+	errNestedTransaction = xerrors.New("firestore: nested transaction")
 )
 
 type currentTransactionKey struct{}
 
-func currentTransactionForRead(c context.Context) ([]byte, error) {
+func currentTransactionForRead(c context.Context, documents []string, collectionIDs []string) ([]byte, error) {
 	if tx, ok := c.Value(currentTransactionKey{}).(*transaction); ok {
 		if len(tx.writes) > 0 {
-			return nil, errReadAfterWrite
+			for _, write := range tx.writes {
+				var document string
+				switch op := write.Operation.(type) {
+				case *pb.Write_Update:
+					document = op.Update.Name
+				case *pb.Write_Delete:
+					document = op.Delete
+				case *pb.Write_Transform:
+					document = op.Transform.Document
+				}
+				for _, read := range documents {
+					if read == document {
+						tx.readAfterWrite = xerrors.Errorf("firestore: %v: read after write in transaction", document)
+						return nil, tx.readAfterWrite
+					}
+				}
+				for _, col := range collectionIDs {
+					if strings.Contains(document, "/"+col+"/") {
+						tx.readAfterWrite = xerrors.Errorf("firestore: %v: read after write in transaction", document)
+						return nil, tx.readAfterWrite
+					}
+				}
+			}
 		}
 		return tx.id, nil
 	}
@@ -57,7 +79,7 @@ func currentTransactionForWrite(c context.Context) (*transaction, error) {
 
 // ErrConcurrentTransaction is returned when a transaction is rolled back due
 // to a conflict with a concurrent transaction.
-var ErrConcurrentTransaction = errors.New("datastore: concurrent transaction")
+var ErrConcurrentTransaction = xerrors.New("datastore: concurrent transaction")
 
 // RunInTransaction runs f in a transaction. It calls f with a transaction
 // context tc that f should use for all App Engine operations.
@@ -122,11 +144,13 @@ func RunInTransaction(c context.Context, f func(tc context.Context) error, opts 
 			return err
 		}
 		t.id = res.Transaction
+		t.writes = nil
+		t.readAfterWrite = nil
 		err = f(context.WithValue(c, currentTransactionKey{}, t))
 		// Read after write can only be checked client-side, so we make sure to check
 		// even if the user does not.
-		if err == nil && t.readAfterWrite {
-			err = errReadAfterWrite
+		if err == nil && t.readAfterWrite != nil {
+			err = t.readAfterWrite
 		}
 		if err != nil {
 			t.rollback()

@@ -284,15 +284,16 @@ func GetMulti(c context.Context, key []*Key, dst interface{}) (err error) {
 	if err := multiValid(key); err != nil {
 		return err
 	}
-	txid, err := currentTransactionForRead(c)
-	if err != nil {
-		return err
-	}
-
 	keys, err := multiKeyToProto(client.projectID, key)
 	if err != nil {
 		return err
 	}
+
+	txid, err := currentTransactionForRead(c, keys, nil)
+	if err != nil {
+		return err
+	}
+
 	res, err := client.getAll(c, keys, txid)
 	if err != nil {
 		return err

@@ -237,7 +237,7 @@ func (q *Query) toProto(ctx context.Context, req *pb.RunQueryRequest, client *cl
 	if len(q.projection) != 0 && q.keysOnly {
 		return errors.New("datastore: query cannot both project and be keys-only")
 	}
-	txid, err := currentTransactionForRead(ctx)
+	txid, err := currentTransactionForRead(ctx, nil, []string{q.kind})
 	if err != nil {
 		return err
 	}
