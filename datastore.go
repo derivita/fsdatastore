@@ -5,20 +5,18 @@
 package datastore
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
 
-	"context"
-
+	dspb "github.com/derivita/fsdatastore/internal"
 	"github.com/golang/protobuf/proto"
-
+	"golang.org/x/xerrors"
 	"google.golang.org/appengine"
 	pb "google.golang.org/genproto/googleapis/firestore/v1"
-
-	dspb "github.com/derivita/fsdatastore/internal"
 )
 
 var (
@@ -273,33 +271,33 @@ func GetMulti(c context.Context, key []*Key, dst interface{}) (err error) {
 	v := reflect.ValueOf(dst)
 	multiArgType, _ := checkMultiArg(v)
 	if multiArgType == multiArgTypeInvalid {
-		return errors.New("datastore: dst has invalid type")
+		return xerrors.New("datastore: dst has invalid type")
 	}
 	if len(key) != v.Len() {
-		return errors.New("datastore: key and dst slices have different length")
+		return xerrors.New("datastore: key and dst slices have different length")
 	}
 	if len(key) == 0 {
 		return nil
 	}
 	if err := multiValid(key); err != nil {
-		return err
+		return xerrors.Errorf("datastore: %w", err)
 	}
 	keys, err := multiKeyToProto(client.projectID, key)
 	if err != nil {
-		return err
+		return xerrors.Errorf("datastore: %w", err)
 	}
 
 	txid, err := currentTransactionForRead(c, keys, nil)
 	if err != nil {
-		return err
+		return xerrors.Errorf("datastore: %w", err)
 	}
 
 	res, err := client.getAll(c, keys, txid)
 	if err != nil {
-		return err
+		return xerrors.Errorf("datastore: %w", err)
 	}
 	if len(key) != len(res) {
-		return errors.New("datastore: internal error: server returned the wrong number of entities")
+		return xerrors.New("datastore: internal error: server returned the wrong number of entities")
 	}
 	multiErr, any := make(appengine.MultiError, len(key)), false
 	for i, e := range res {
