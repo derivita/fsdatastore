@@ -76,7 +76,7 @@ func (c *client) endSpan(ctx context.Context, err error) {
 func (c *client) log(ctx context.Context, severity, message string) {
 	span := trace.FromContext(ctx).SpanContext()
 	log := logEntry{
-		TraceID:  span.TraceID.String(),
+		TraceID:  fmt.Sprintf("projects/%s/traces/%s", c.projectID, span.TraceID.String()),
 		SpanID:   span.SpanID.String(),
 		Severity: severity,
 		Message:  message,
