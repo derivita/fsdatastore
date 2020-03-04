@@ -3,6 +3,7 @@ package datastore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	vkit "cloud.google.com/go/firestore/apiv1"
+	"github.com/golang/protobuf/proto"
 	gax "github.com/googleapis/gax-go/v2"
 	"go.opencensus.io/trace"
 	"google.golang.org/api/option"
@@ -25,6 +27,13 @@ type client struct {
 	projectID  string
 	databaseID string
 	c          *vkit.Client
+}
+
+type logEntry struct {
+	Severity string `json:"severity,omitempty"`
+	TraceID  string `json:"logging.googleapis.com/trace"`
+	SpanID   string `json:"logging.googleapis.com/spanId"`
+	Message  string `json:"message"`
 }
 
 func Init(projectID string) error {
@@ -64,6 +73,17 @@ func (c *client) endSpan(ctx context.Context, err error) {
 	}
 }
 
+func (c *client) log(ctx context.Context, severity, message string) {
+	span := trace.FromContext(ctx).SpanContext()
+	log := logEntry{
+		TraceID:  span.TraceID.String(),
+		SpanID:   span.SpanID.String(),
+		Severity: severity,
+		Message:  message,
+	}
+	json.NewEncoder(os.Stderr).Encode(log)
+}
+
 func newClient(ctx context.Context, opts ...option.ClientOption) (*vkit.Client, error) {
 	var o []option.ClientOption
 	// If this environment variable is defined, configure the client to talk to the emulator.
@@ -91,6 +111,7 @@ func (c *client) getAll(ctx context.Context, docNames []string, tid []byte) ([]*
 	if tid != nil {
 		req.ConsistencySelector = &pb.BatchGetDocumentsRequest_Transaction{tid}
 	}
+	c.log(ctx, "DEBUG", fmt.Sprintf("Sending %v", proto.MarshalTextString(req)))
 	streamClient, err := c.c.BatchGetDocuments(ctx, req)
 	if err != nil {
 		return nil, err
@@ -104,8 +125,10 @@ func (c *client) getAll(ctx context.Context, docNames []string, tid []byte) ([]*
 			break
 		}
 		if err != nil {
+			c.log(ctx, "ERROR", fmt.Sprintf("getMulti error: %+v", err))
 			return nil, err
 		}
+		c.log(ctx, "DEBUG", fmt.Sprintf("got %v", proto.MarshalTextString(resp)))
 		resps = append(resps, resp)
 	}
 

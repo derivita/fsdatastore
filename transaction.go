@@ -36,7 +36,7 @@ var (
 type currentTransactionKey struct{}
 
 func currentTransactionForRead(c context.Context, documents []string, collectionIDs []string) ([]byte, error) {
-	if tx, ok := c.Value(currentTransactionKey{}).(*transaction); ok {
+	if tx, ok := c.Value(currentTransactionKey{}).(*transaction); ok && tx != nil {
 		if len(tx.writes) > 0 {
 			for _, write := range tx.writes {
 				var document string
@@ -68,7 +68,7 @@ func currentTransactionForRead(c context.Context, documents []string, collection
 }
 
 func currentTransactionForWrite(c context.Context) (*transaction, error) {
-	if tx, ok := c.Value(currentTransactionKey{}).(*transaction); ok {
+	if tx, ok := c.Value(currentTransactionKey{}).(*transaction); ok && tx != nil {
 		if tx.readOnly {
 			return nil, errWriteReadOnly
 		}

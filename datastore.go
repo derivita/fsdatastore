@@ -286,6 +286,7 @@ func GetMulti(c context.Context, key []*Key, dst interface{}) (err error) {
 	if err != nil {
 		return xerrors.Errorf("datastore: %w", err)
 	}
+	defer func() { client.log(c, "INFO", fmt.Sprintf("GetMulti(%v) -> %v", keys, err)) }()
 
 	txid, err := currentTransactionForRead(c, keys, nil)
 	if err != nil {
