@@ -166,11 +166,8 @@ func keyToReferenceValue(defaultAppID string, k *Key) string {
 	if k.Incomplete() {
 		panic(ErrInvalidKey)
 	}
-	appID := k.AppID()
-	if appID == "" {
-		appID = defaultAppID
-	}
-	parts := []string{"projects", appID, "databases/(default)/documents"}
+	// Ignore the key's app id, always use the default.
+	parts := []string{"projects", defaultAppID, "databases/(default)/documents"}
 	var appendKey func(k *Key)
 	appendKey = func(k *Key) {
 		if k.Parent() != nil {
