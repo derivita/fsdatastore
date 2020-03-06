@@ -214,7 +214,7 @@ func TestKeyToReference(t *testing.T) {
 				intID: 1,
 				appID: "glibrary",
 			},
-			exp: "projects/glibrary/databases/(default)/documents/Person/1",
+			exp: "projects/test-app/databases/(default)/documents/Person/1",
 		},
 		{
 			desc: "A simple key with a string ID",
@@ -223,7 +223,7 @@ func TestKeyToReference(t *testing.T) {
 				stringID: "graph:7-day-active",
 				appID:    "glibrary",
 			},
-			exp: "projects/glibrary/databases/(default)/documents/Graph/graph:7-day-active",
+			exp: "projects/test-app/databases/(default)/documents/Graph/graph:7-day-active",
 		},
 		{
 			desc: "A simple key with no app id",
@@ -245,7 +245,7 @@ func TestKeyToReference(t *testing.T) {
 				},
 				appID: "glibrary",
 			},
-			exp: "projects/glibrary/databases/(default)/documents/WordIndex/1020032/WordIndex/1033",
+			exp: "projects/test-app/databases/(default)/documents/WordIndex/1020032/WordIndex/1033",
 		},
 	}
 	for _, tc := range testCases {

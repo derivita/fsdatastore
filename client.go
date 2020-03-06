@@ -11,7 +11,6 @@ import (
 	"time"
 
 	vkit "cloud.google.com/go/firestore/apiv1"
-	"github.com/golang/protobuf/proto"
 	gax "github.com/googleapis/gax-go/v2"
 	"go.opencensus.io/trace"
 	"google.golang.org/api/option"
