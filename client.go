@@ -111,7 +111,6 @@ func (c *client) getAll(ctx context.Context, docNames []string, tid []byte) ([]*
 	if tid != nil {
 		req.ConsistencySelector = &pb.BatchGetDocumentsRequest_Transaction{tid}
 	}
-	c.log(ctx, "DEBUG", fmt.Sprintf("Sending %v", proto.MarshalTextString(req)))
 	streamClient, err := c.c.BatchGetDocuments(ctx, req)
 	if err != nil {
 		return nil, err
@@ -125,10 +124,8 @@ func (c *client) getAll(ctx context.Context, docNames []string, tid []byte) ([]*
 			break
 		}
 		if err != nil {
-			c.log(ctx, "ERROR", fmt.Sprintf("getMulti error: %+v", err))
 			return nil, err
 		}
-		c.log(ctx, "DEBUG", fmt.Sprintf("got %v", proto.MarshalTextString(resp)))
 		resps = append(resps, resp)
 	}
 
