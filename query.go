@@ -142,9 +142,13 @@ func (q *Query) Filter(filterStr string, value interface{}) *Query {
 		q.err = errors.New("datastore: invalid filter: " + filterStr)
 		return q
 	}
+
 	f := filter{
 		FieldName: strings.TrimRight(filterStr, " ><=!"),
 		Value:     value,
+	}
+	if strings.HasSuffix(f.FieldName, " array-contains") {
+		f.FieldName = strings.TrimSpace(strings.TrimSuffix(f.FieldName, " array-contains"))
 	}
 	switch op := strings.TrimSpace(filterStr[len(f.FieldName):]); op {
 	case "<=":
