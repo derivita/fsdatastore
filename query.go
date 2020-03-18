@@ -28,14 +28,16 @@ const (
 	equal
 	greaterEq
 	greaterThan
+	arrayContains
 )
 
 var operatorToProto = map[operator]pb.StructuredQuery_FieldFilter_Operator{
-	lessThan:    pb.StructuredQuery_FieldFilter_LESS_THAN,
-	lessEq:      pb.StructuredQuery_FieldFilter_LESS_THAN_OR_EQUAL,
-	equal:       pb.StructuredQuery_FieldFilter_EQUAL,
-	greaterEq:   pb.StructuredQuery_FieldFilter_GREATER_THAN_OR_EQUAL,
-	greaterThan: pb.StructuredQuery_FieldFilter_GREATER_THAN,
+	lessThan:      pb.StructuredQuery_FieldFilter_LESS_THAN,
+	lessEq:        pb.StructuredQuery_FieldFilter_LESS_THAN_OR_EQUAL,
+	equal:         pb.StructuredQuery_FieldFilter_EQUAL,
+	greaterEq:     pb.StructuredQuery_FieldFilter_GREATER_THAN_OR_EQUAL,
+	greaterThan:   pb.StructuredQuery_FieldFilter_GREATER_THAN,
+	arrayContains: pb.StructuredQuery_FieldFilter_ARRAY_CONTAINS,
 }
 
 // filter is a conditional filter on query results.
@@ -140,9 +142,13 @@ func (q *Query) Filter(filterStr string, value interface{}) *Query {
 		q.err = errors.New("datastore: invalid filter: " + filterStr)
 		return q
 	}
+
 	f := filter{
 		FieldName: strings.TrimRight(filterStr, " ><=!"),
 		Value:     value,
+	}
+	if strings.HasSuffix(f.FieldName, " array-contains") {
+		f.FieldName = strings.TrimSpace(strings.TrimSuffix(f.FieldName, " array-contains"))
 	}
 	switch op := strings.TrimSpace(filterStr[len(f.FieldName):]); op {
 	case "<=":
@@ -155,6 +161,8 @@ func (q *Query) Filter(filterStr string, value interface{}) *Query {
 		f.Op = greaterThan
 	case "=":
 		f.Op = equal
+	case "array-contains":
+		f.Op = arrayContains
 	default:
 		q.err = fmt.Errorf("datastore: invalid operator %q in filter %q", op, filterStr)
 		return q
