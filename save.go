@@ -238,6 +238,9 @@ func propertiesToProto(c context.Context, defaultAppID string, key *Key, props [
 			x.ValueType = &pb.Value_DoubleValue{v}
 		case *Key:
 			if v != nil {
+				if !v.valid() || v.Incomplete() {
+					return nil, fmt.Errorf("datastore: invalid key for property %s", p.Name)
+				}
 				x.ValueType = &pb.Value_ReferenceValue{keyToReferenceValue(defaultAppID, v)}
 			}
 		case time.Time:
