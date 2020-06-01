@@ -151,8 +151,18 @@ func (l *propertyLoader) load(codec *structCodec, structValue reflect.Value, p P
 func setVal(v reflect.Value, pValue interface{}) string {
 	switch v.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		x, ok := pValue.(int64)
-		if !ok && pValue != nil {
+		var x int64
+		switch pv := pValue.(type) {
+		case int64:
+			x = pv
+		case float64:
+			x = int64(pv)
+			if float64(x) != pv {
+				return fmt.Sprintf("float %f does not fit into %s", pv, v.Type())
+			}
+		case nil:
+			x = 0
+		default:
 			return typeMismatchReason(pValue, v)
 		}
 		if v.OverflowInt(x) {
@@ -177,14 +187,24 @@ func setVal(v reflect.Value, pValue interface{}) string {
 			}
 		}
 	case reflect.Float32, reflect.Float64:
-		x, ok := pValue.(float64)
-		if !ok && pValue != nil {
+		var f float64
+		switch x := pValue.(type) {
+		case float64:
+			f = x
+		case int64:
+			f = float64(x)
+			if int64(f) != x {
+				return fmt.Sprintf("value %v overflows struct field of type %v", x, v.Type())
+			}
+		case nil:
+			f = 0
+		default:
 			return typeMismatchReason(pValue, v)
 		}
-		if v.OverflowFloat(x) {
-			return fmt.Sprintf("value %v overflows struct field of type %v", x, v.Type())
+		if v.OverflowFloat(f) {
+			return fmt.Sprintf("value %v overflows struct field of type %v", f, v.Type())
 		}
-		v.SetFloat(x)
+		v.SetFloat(f)
 	case reflect.Ptr:
 		x, ok := pValue.(*Key)
 		if !ok && pValue != nil {
